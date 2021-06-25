@@ -227,7 +227,22 @@ public abstract class JdbcMetadataHandler
     {
         SchemaBuilder schemaBuilder = SchemaBuilder.newBuilder();
 
-        try (ResultSet resultSet = getColumns(jdbcConnection.getCatalog(), tableName, jdbcConnection.getMetaData())) {
+        Set<String> databaseNames = listDatabaseNames(jdbcConnection);
+
+        LOGGER.warn("found databases: " + String.join(",", databaseNames));
+
+        TableName resolvedTableName = tableName;
+        if (!databaseNames.contains(tableName.getSchemaName())) {
+            String schemaName = databaseNames.stream()
+                    .filter(s -> s.equalsIgnoreCase(tableName.getSchemaName()))
+                    .findFirst()
+                    .orElse(tableName.getSchemaName());
+            LOGGER.warn("using schema name: " + schemaName + " for original" + tableName.getSchemaName());
+
+            resolvedTableName = new TableName(schemaName, tableName.getTableName());
+        }
+
+        try (ResultSet resultSet = getColumns(jdbcConnection.getCatalog(), resolvedTableName, jdbcConnection.getMetaData())) {
             boolean found = false;
             while (resultSet.next()) {
                 ArrowType columnType = JdbcArrowTypeConverter.toArrowType(
@@ -256,7 +271,7 @@ public abstract class JdbcMetadataHandler
             }
 
             if (!found) {
-                throw new RuntimeException("Could not find table in " + tableName.getSchemaName());
+                throw new RuntimeException("Could not find table in " + resolvedTableName.getSchemaName());
             }
 
             // add partition columns

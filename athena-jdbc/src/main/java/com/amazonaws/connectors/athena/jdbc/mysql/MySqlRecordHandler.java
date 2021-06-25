@@ -35,6 +35,7 @@ import com.amazonaws.services.s3.AmazonS3ClientBuilder;
 import com.amazonaws.services.secretsmanager.AWSSecretsManager;
 import com.amazonaws.services.secretsmanager.AWSSecretsManagerClientBuilder;
 import com.google.common.annotations.VisibleForTesting;
+import com.google.common.collect.ImmutableSet;
 import org.apache.arrow.vector.types.pojo.Schema;
 import org.apache.commons.lang3.Validate;
 import org.slf4j.Logger;
@@ -42,7 +43,9 @@ import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
+import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.Set;
 
 /**
  * Data handler, user must have necessary permissions to read from necessary tables.
@@ -80,11 +83,42 @@ public class MySqlRecordHandler
         this.jdbcSplitQueryBuilder = Validate.notNull(jdbcSplitQueryBuilder, "query builder must not be null");
     }
 
+    private Set<String> listDatabaseNames(final Connection jdbcConnection)
+            throws SQLException
+    {
+        try (ResultSet resultSet = jdbcConnection.getMetaData().getSchemas()) {
+            ImmutableSet.Builder<String> schemaNames = ImmutableSet.builder();
+            while (resultSet.next()) {
+                String schemaName = resultSet.getString("TABLE_SCHEM");
+                // skip internal schemas
+                if (!schemaName.equals("information_schema")) {
+                    schemaNames.add(schemaName);
+                }
+            }
+            return schemaNames.build();
+        }
+    }
+
     @Override
     public PreparedStatement buildSplitSql(Connection jdbcConnection, String catalogName, TableName tableName, Schema schema, Constraints constraints, Split split)
             throws SQLException
     {
-        PreparedStatement preparedStatement = jdbcSplitQueryBuilder.buildSql(jdbcConnection, null, tableName.getSchemaName(), tableName.getTableName(), schema, constraints, split);
+        Set<String> databaseNames = listDatabaseNames(jdbcConnection);
+
+        LOGGER.info("found databases: " + String.join(",", databaseNames));
+
+        TableName resolvedTableName = tableName;
+        if (!databaseNames.contains(tableName.getSchemaName())) {
+            String schemaName = databaseNames.stream()
+                    .filter(s -> s.equalsIgnoreCase(tableName.getSchemaName()))
+                    .findFirst()
+                    .orElse(tableName.getSchemaName());
+            LOGGER.info("using schema name: " + schemaName + " for original" + tableName.getSchemaName());
+
+            resolvedTableName = new TableName(schemaName, tableName.getTableName());
+        }
+
+        PreparedStatement preparedStatement = jdbcSplitQueryBuilder.buildSql(jdbcConnection, null, resolvedTableName.getSchemaName(), resolvedTableName.getTableName(), schema, constraints, split);
 
         // Disable fetching all rows.
         preparedStatement.setFetchSize(Integer.MIN_VALUE);
